@@ -129,7 +129,6 @@ def draw_card(screen, fonts, card: Card, x: int, y: int,
         if selected:
             bc = MTG_GLOW_GOLD
             bw = 3
-            draw_glow(screen, (x + w//2, y + h//2), max(w, h)//2 + 4, MTG_GLOW_GOLD, alpha=60)
         elif hovered:
             bc = MTG_GLOW_BLUE
             bw = 2

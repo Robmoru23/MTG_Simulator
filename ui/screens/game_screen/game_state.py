@@ -17,7 +17,7 @@ class GameState:
         # Subfases de combate
         self.combat_subphase = "declarar"       # declarar | bloquear | damage
         self.pending_attackers: List[Card] = [] # Atacantes seleccionados por el jugador
-        self.temp_blockers: Dict[Card, Card] = {}
+        self.temp_blockers: Dict[Card, List[Card]] = {}
         self.selecting_blocker_for: Optional[Card] = None
 
         # Manos
@@ -36,6 +36,14 @@ class GameState:
         self.hovering_graveyard = False
         self.graveyard_scroll_index = 0
         self.graveyard_display_card = None
+        
+        self.hovering_opponent_graveyard = False
+        self.opponent_graveyard_scroll_index = 0
+        self.opponent_graveyard_display_card = None
+
+        self.selecting_target_for_ability = False   # True cuando estamos esperando un objetivo
+        self.pending_ability = None                 # Almacena la función a ejecutar al seleccionar objetivo
+        self.valid_targets = []                    # Lista de cartas válidas como objetivo
 
     def update_hand_positions(self, mouse_y: int, screen_height: int):
         if mouse_y > screen_height - 100:

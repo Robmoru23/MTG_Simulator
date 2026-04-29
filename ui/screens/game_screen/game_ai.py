@@ -144,9 +144,8 @@ class AIController:
                     self.on_rotate_card(att, 90)
                 self.game.declare_attackers(attackers)
                 self.on_log(f"⚔️ IA ataca con {len(attackers)} criatura(s) ⚔️")
-                self._next()           # → step 8: esperar al jugador
+                self._next()           # → step 8: esperar a que el jugador resuelva
             else:
-                # Sin atacantes: avanzar la fase directamente y saltar step 8
                 self.game.advance_phase()
                 self._next(2)          # → step 9
         else:

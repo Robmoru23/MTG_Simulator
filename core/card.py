@@ -158,9 +158,65 @@ Llanowar_Elves = Card(
     toughness=1
 )
 
+Giant_Growth = Card(
+    name="Giant Growth",
+    mana_cost="{G}",
+    colors=[Color.GREEN],
+    card_type=CardType.INSTANT,
+    text="La criatura objetivo obtiene +3/+3 hasta el final del turno.",
+    image_path="assets/cards_imgs/266_Giant_Growth_Inglés.png",
+    power=None,
+    toughness=None
+)
+
+Bandage = Card(
+    name="Bandage",
+    mana_cost="{W}",
+    colors=[Color.WHITE],
+    card_type=CardType.INSTANT,
+    text="Prevén el próximo 1 punto de daño que fuera a ser hecho a la criatura o jugador objetivo este turno.\nRobas una carta.",
+    image_path="assets/cards_imgs/9_Bandage_Inglés.png",
+    power=None,
+    toughness=None
+)
+
+Peek = Card(
+    name="Peek",
+    mana_cost="{U}",
+    colors=[Color.BLUE],
+    card_type=CardType.INSTANT,
+    text="Robas una carta.\nMira la mano del oponente.",
+    image_path="assets/cards_imgs/94_Peek_Inglés.png",
+    power=None,
+    toughness=None
+)
+
+Terror = Card(
+    name="Terror",
+    mana_cost="{1}{B}",
+    colors=[Color.BLACK],
+    card_type=CardType.INSTANT,
+    text="Destruye la criatura objetivo que no sea artefacto ni negra. No puede ser regenerada.",
+    image_path="assets/cards_imgs/182_Terror_Inglés.png",
+    power=None,
+    toughness=None
+)
+
+Fists_of_the_Anvil = Card(
+    name="Fists of the Anvil",
+    mana_cost="{1}{R}",
+    colors=[Color.RED],
+    card_type=CardType.INSTANT,
+    text="La criatura objetivo obtiene +4/+0 hasta el final del turno.",
+    image_path="assets/cards_imgs/201_Fists_of_the_Anvil_Inglés.png",
+    power=None,
+    toughness=None
+)
+
 ALL_CARDS = [
     Plains, Island, Swamp, Mountain, Forest,
     Suntail_Hawk, Cloud_Sprite, Festering_Goblin, Spark_Elemental, Llanowar_Elves,
+    Giant_Growth, Bandage, Peek, Terror, Fists_of_the_Anvil
 ]
 
 CARDS_BY_NAME = {card.name: card for card in ALL_CARDS}

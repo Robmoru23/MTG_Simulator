@@ -73,13 +73,14 @@ class GameRenderer:
 
         # Cartas del oponente
         self._render_cards(
-            opponent, game.attackers, positions["opp_creatures"], positions["opp_lands"],
+            opponent, game, game.attackers,
+            positions["opp_creatures"], positions["opp_lands"],
             state, card_rotations, is_opponent=True,
         )
 
-        # Cartas del jugador + rectángulos de tierras para el maná flotante
         land_rects = self._render_cards(
-            player, [], positions["player_creatures"], positions["player_lands"],
+            player, game, [],
+            positions["player_creatures"], positions["player_lands"],
             state, card_rotations, is_opponent=False,
             pending_attackers=pending_attackers, return_land_rects=True,
         )
@@ -91,6 +92,7 @@ class GameRenderer:
         self._render_buttons(buttons, is_player_turn, is_combat_phase, combat_subphase)
         self._render_log(game.log_messages, state)   # pasar state
         self._render_mana(player, playmat_player)  # Pasar el playmat del jugador
+        self._draw_blocking_lines(game, state, positions["player_creatures"], positions["opp_creatures"])
 
         # Dibujar biblioteca
         player_library_rect = playmat_player.library_rect
@@ -119,7 +121,13 @@ class GameRenderer:
 
         if state.hovering_graveyard and state.graveyard_display_card:
             self._render_graveyard_tooltip(state.graveyard_display_card, len(game.players[0].graveyard), state.graveyard_scroll_index)
-            
+        
+        if state.hovering_graveyard and state.graveyard_display_card:
+            self._render_graveyard_tooltip(state.graveyard_display_card, len(game.players[0].graveyard), state.graveyard_scroll_index, "JUGADOR")
+
+        if state.hovering_opponent_graveyard and state.graveyard_display_card:
+            self._render_graveyard_tooltip(state.graveyard_display_card, len(game.players[1].graveyard), state.opponent_graveyard_scroll_index, "OPONENTE")
+
         # Animaciones
         for anim in state.animations:
             pos = anim.get_pos()
@@ -131,11 +139,14 @@ class GameRenderer:
     # Cartas en el campo de batalla
     # ------------------------------------------------------------------
 
-    def _render_cards(self, player, attackers, creatures_pos, lands_pos,
-                      state, card_rotations, is_opponent=False,
-                      pending_attackers=None, return_land_rects=False):
+    def _render_cards(self, player, game, attackers, creatures_pos, lands_pos,
+                    state, card_rotations, is_opponent=False,
+                    pending_attackers=None, return_land_rects=False):
         CW, CH = GameConfig.CARD_WIDTH, GameConfig.CARD_HEIGHT
         land_rects = []
+        
+        # Obtener posiciones de todas las criaturas para las líneas de conexión
+        creature_positions = {}
         
         # Criaturas
         creatures = [c for c in player.battlefield if c.card_type == CardType.CREATURE]
@@ -143,35 +154,42 @@ class GameRenderer:
             x = creatures_pos[0] + i * (CW + 8)
             y = creatures_pos[1]
             
-            # Verificar si esta criatura está seleccionada como atacante
             is_selected_as_attacker = not is_opponent and pending_attackers and card in pending_attackers
             is_att = card in attackers
-            
             angle = card_rotations.get(card, 0)
             
             rect = draw_card(self.screen, self.fonts, card, x, y,
-                            selected=is_selected_as_attacker,  # Resaltar si está seleccionada
+                            selected=is_selected_as_attacker,
                             hovered=(card == state.hovered_card),
                             tapped=card.tapped, rotation_angle=angle,
                             w=CW, h=CH)
+            
+            # Guardar posición para líneas de conexión
+            creature_positions[card.name] = (x + CW // 2, y + CH // 2)
             
             # Borde rojo para atacantes confirmados
             if is_att:
                 pygame.draw.rect(self.screen, BRIGHT_RED, (x - 3, y - 3, CW + 6, CH + 6), 3, border_radius=8)
             
-            # Resalte: bloqueador asignado (dorado)
-            if not is_opponent:
-                for blk in state.temp_blockers.values():
-                    if blk is card:
-                        pygame.draw.rect(self.screen, GOLD, (x - 3, y - 3, CW + 6, CH + 6), 3, border_radius=8)
-                        break
             # Resalte: atacante seleccionado para bloquear (naranja)
             if is_opponent and state.selecting_blocker_for is card:
                 pygame.draw.rect(self.screen, ORANGE, (x - 3, y - 3, CW + 6, CH + 6), 3, border_radius=8)
-
+            
+            # Resalte: bloqueador asignado temporalmente (dorado)
+            if not is_opponent and state.temp_blockers:
+                for attacker, blocker in state.temp_blockers.items():
+                    if blocker is card:
+                        pygame.draw.rect(self.screen, GOLD, (x - 3, y - 3, CW + 6, CH + 6), 3, border_radius=8)
+                        break
+            
+            # Resalte para habilidades con objetivo (Festering Goblin)
+            if hasattr(game, 'pending_target_selection') and game.pending_target_selection:
+                if card in game.pending_target_selection["targets"]:
+                    pygame.draw.rect(self.screen, (255, 0, 255), (x-2, y-2, CW+4, CH+4), 2, border_radius=6)
+            
             zone = "creature_opp" if is_opponent else "creature_player"
             self.card_rects.append((card, rect, zone))
-
+        
         # Tierras
         lands = [c for c in player.battlefield if c.card_type == CardType.LAND]
         for i, land in enumerate(lands):
@@ -179,13 +197,69 @@ class GameRenderer:
             y = lands_pos[1]
             angle = card_rotations.get(land, 0)
             rect = draw_card(self.screen, self.fonts, land, x, y,
-                             tapped=land.tapped, rotation_angle=angle, w=CW, h=CH)
+                            tapped=land.tapped, rotation_angle=angle, w=CW, h=CH)
             zone = "land_opp" if is_opponent else "land_player"
             self.card_rects.append((land, rect, zone))
             land_rects.append(rect)
-
+        
+        # Dibujar líneas de conexión entre atacantes y bloqueadores (solo durante fase de bloqueo)
+        if state.combat_subphase == "bloquear" and state.temp_blockers and not is_opponent:
+            for attacker, blocker in state.temp_blockers.items():
+                att_pos = None
+                blk_pos = None
+                
+                # Buscar posición del atacante (en el campo del oponente)
+                # Para obtener las posiciones de los atacantes, necesitamos las coordenadas que se pasaron
+                # Usamos las posiciones guardadas en creature_positions del oponente
+                # Esto se hace en la llamada a _render_cards para el oponente, pero aquí no tenemos acceso a eso.
+                # Alternativa: dibujar las líneas en el método render después de ambas llamadas.
+                pass
+        
         if return_land_rects:
             return land_rects
+
+    def _draw_blocking_lines(self, game, state, player_creatures_pos, opponent_creatures_pos):
+        """Dibuja líneas doradas conectando atacantes con sus bloqueadores asignados"""
+        CW, CH = GameConfig.CARD_WIDTH, GameConfig.CARD_HEIGHT
+        
+        # Diccionario para guardar posiciones por objeto de carta (no por nombre)
+        opponent_positions = {}
+        player_positions = {}
+        
+        # Obtener posiciones de las criaturas del oponente (atacantes)
+        opponent_creatures = [c for c in game.players[1].battlefield if c.card_type == CardType.CREATURE]
+        for i, card in enumerate(opponent_creatures):
+            x = opponent_creatures_pos[0] + i * (CW + 8)
+            y = opponent_creatures_pos[1]
+            opponent_positions[card] = (x + CW // 2, y + CH // 2)
+        
+        # Obtener posiciones de las criaturas del jugador (bloqueadores)
+        player_creatures = [c for c in game.players[0].battlefield if c.card_type == CardType.CREATURE]
+        for i, card in enumerate(player_creatures):
+            x = player_creatures_pos[0] + i * (CW + 8)
+            y = player_creatures_pos[1]
+            player_positions[card] = (x + CW // 2, y + CH // 2)
+        
+        # Dibujar líneas para cada bloqueo temporal
+        for attacker, blocker in state.temp_blockers.items():
+            # Buscar la posición usando el objeto de carta directamente
+            att_pos = opponent_positions.get(attacker)
+            blk_pos = player_positions.get(blocker)
+            
+            if att_pos and blk_pos:
+                # Línea con efecto de resplandor (múltiples capas)
+                for offset in range(3, 0, -1):
+                    alpha = 60 - offset * 15
+                    color = (255, 215, 0, alpha)
+                    line_width = 3 - offset + 1
+                    pygame.draw.line(self.screen, color[:3], att_pos, blk_pos, line_width)
+                
+                # Línea principal dorada
+                pygame.draw.line(self.screen, GOLD, att_pos, blk_pos, 3)
+                
+                # Círculos en los extremos para mejor visibilidad
+                pygame.draw.circle(self.screen, GOLD, att_pos, 6)
+                pygame.draw.circle(self.screen, GOLD, blk_pos, 6)
 
     # ------------------------------------------------------------------
     # Maná flotante
@@ -196,21 +270,22 @@ class GameRenderer:
             if i >= len(land_rects):
                 break
             land_rect = land_rects[i]
-            color = _MANA_RGB.get(mana["color"], (200, 200, 200))
+            color_key = mana["color"]
             life_ratio = mana["life"] / 60
             y_offset = int((1 - life_ratio) * 40)
-            alpha = int(255 * life_ratio)
             cx = land_rect.centerx
             cy = land_rect.y - 20 - y_offset
-
-            for r in range(12, 6, -2):
-                a = min(255, alpha // max(1, 13 - r))
-                surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-                pygame.draw.circle(surf, (*color, a), (r, r), r)
-                self.screen.blit(surf, (cx - r, cy - r))
-
-            sym = self.fonts["small"].render(mana["color"], True, (255, 255, 255))
-            self.screen.blit(sym, sym.get_rect(center=(cx, cy)))
+            
+            icon = self._image_manager.load_mana_icon(color_key)
+            if icon:
+                scaled = pygame.transform.smoothscale(icon, (24, 24))
+                self.screen.blit(scaled, scaled.get_rect(center=(cx, cy)))
+            else:
+                # Fallback: círculo con color y letra
+                color = _MANA_RGB.get(color_key, (200, 200, 200))
+                pygame.draw.circle(self.screen, color, (cx, cy), 12)
+                sym = self.fonts["small"].render(color_key, True, (255, 255, 255))
+                self.screen.blit(sym, sym.get_rect(center=(cx, cy)))
 
     # ------------------------------------------------------------------
     # Manos
@@ -272,48 +347,33 @@ class GameRenderer:
     # ------------------------------------------------------------------
 
     def _render_mana(self, player, playmat):
-        """Renderiza el maná disponible en la esquina inferior izquierda del playmat"""
-        # Posición relativa al playmat del jugador
         x = playmat.rect.x + 10
         y = playmat.rect.y + playmat.rect.height - 50
-        
-        # Colores para cada tipo de maná
-        mana_colors = {
-            "W": (255, 255, 200),
-            "U": (100, 150, 255),
-            "B": (100, 100, 100),
-            "R": (255, 100, 100),
-            "G": (100, 255, 100),
-            "C": (200, 200, 200),
-        }
-        
-        # Filtrar maná disponible
+
         available = [(color, amount) for color, amount in player.mana_pool.items() if amount > 0]
-        
         if available:
+            # Posiciones en pentágono (solo para visualización, pero si hay muchos se pueden alinear)
+            # Para simplicidad, los mostramos en línea horizontal por ahora.
+            # Si quieres pentágono estricto, habría que calcular posiciones.
             x_offset = 0
             for color, amount in available:
-                color_rgb = mana_colors.get(color, (200, 200, 200))
-                
-                # Círculo de color
-                pygame.draw.circle(self.screen, color_rgb, (x + 15 + x_offset, y + 15), 12)
-                pygame.draw.circle(self.screen, BLACK, (x + 15 + x_offset, y + 15), 12, 1)
-                
-                # Cantidad
-                num_surf = self.fonts['small'].render(str(amount), True, WHITE)
-                self.screen.blit(num_surf, (x + 10 + x_offset, y + 8))
-                
-                # Símbolo
-                sym_surf = self.fonts['tiny'].render(color, True, BLACK)
-                sym_rect = sym_surf.get_rect(center=(x + 15 + x_offset, y + 15))
-                self.screen.blit(sym_surf, sym_rect)
-                
-                x_offset += 35
+                icon = self._image_manager.load_mana_icon(color)
+                if icon:
+                    scaled = pygame.transform.smoothscale(icon, (24, 24))
+                    self.screen.blit(scaled, (x + x_offset, y))
+                    num_surf = self.fonts['small'].render(str(amount), True, WHITE)
+                    self.screen.blit(num_surf, (x + x_offset + 18, y + 12))
+                    x_offset += 35
+                else:
+                    # fallback a círculo
+                    color_rgb = _MANA_RGB.get(color, (200,200,200))
+                    pygame.draw.circle(self.screen, color_rgb, (x + 15 + x_offset, y + 15), 12)
+                    num_surf = self.fonts['small'].render(str(amount), True, WHITE)
+                    self.screen.blit(num_surf, (x + 10 + x_offset, y + 8))
+                    x_offset += 35
         else:
             zero_surf = self.fonts['medium'].render("0", True, LIGHT_GRAY)
             self.screen.blit(zero_surf, (x + 10, y + 8))
-        
-        # Etiqueta
         label = self.fonts['tiny'].render("MANÁ", True, MTG_GLOW_GOLD)
         self.screen.blit(label, (x, y - 5))
 
@@ -471,7 +531,7 @@ class GameRenderer:
         surf = self.fonts[font_key].render(text, True, GOLD)
         self.screen.blit(surf, surf.get_rect(center=(cx, cy)))
 
-    def _render_graveyard_tooltip(self, card: Card, total_cards: int, current_index: int):
+    def _render_graveyard_tooltip(self, card: Card, total_cards: int, current_index: int, owner: str = "CEMENTERIO"):
         """Renderiza la carta del cementerio con navegación"""
         W, H = GameConfig.SCREEN_WIDTH, GameConfig.SCREEN_HEIGHT
         big_w, big_h = 400, 580
@@ -484,7 +544,6 @@ class GameRenderer:
             tx = mx - big_w - 30
         ty = max(10, min(ty, H - big_h - 10))
         
-        # Mostrar carta
         highres = self._image_manager.load_card_image_highres(card)
         if highres:
             scaled = pygame.transform.smoothscale(highres, (big_w, big_h))
@@ -495,7 +554,7 @@ class GameRenderer:
             pygame.draw.rect(self.screen, GOLD, (tx, ty, big_w, big_h), 3, border_radius=8)
             
             # Información de navegación
-            nav_text = f"CEMENTERIO: {current_index + 1} / {total_cards} (rueda del ratón)"
+            nav_text = f"{owner}: {current_index + 1} / {total_cards} (rueda del ratón)"
             nav_surf = self.fonts['small'].render(nav_text, True, GOLD)
             nav_rect = nav_surf.get_rect(center=(tx + big_w // 2, ty + big_h + 20))
             bg_rect = nav_rect.inflate(20, 8)

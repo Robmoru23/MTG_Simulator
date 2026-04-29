@@ -71,11 +71,25 @@ class EventHandler:
             if event.key == pygame.K_SPACE and player_can_act():
                 advance_phase_func()
 
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                if hasattr(self.game, 'pending_target_selection'):
+                    del self.game.pending_target_selection
+                    self.on_set_status("Selección de objetivo cancelada")
+                    return "menu"
+                return "menu"
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             mx, my = event.pos
             return self._handle_click(mx, my, is_player_turn, is_combat_phase,
                                       is_main_phase, btn_phase, advance_phase_func,
                                       player_can_act)
+
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:  # Clic derecho
+            if self.state.selecting_blocker_for is not None:
+                self.state.selecting_blocker_for = None
+                self.on_set_status("Selección de bloqueador cancelada")
+            return
 
         if event.type == pygame.MOUSEMOTION:
             self._update_hover(event.pos)
@@ -101,9 +115,26 @@ class EventHandler:
 
     def _handle_card_click(self, card: Card, zone: str,
                            is_player_turn: bool, is_main_phase: bool, is_combat_phase: bool):
+        
+        print(f"📌 CLICK en {card.name} | Zona: {zone} | Subfase: {self.state.combat_subphase}")
         if zone in ("opp_hand", "land_opp"):
             self.on_set_status("No puedes interactuar con las cartas del oponente")
             return
+
+         # ── SELECCIÓN DE OBJETIVO PARA HABILIDAD ───────────────────────
+        if hasattr(self.game, 'pending_target_selection') and self.game.pending_target_selection:
+            if zone in ("creature_player", "creature_opp"):
+                if card in self.game.pending_target_selection["targets"]:
+                    callback = self.game.pending_target_selection["callback"]
+                    callback(card)
+                    self.on_log(f"🎯 Objetivo seleccionado: {card.name}")
+                    return
+                else:
+                    self.on_set_status("❌ Esa criatura no es un objetivo válido")
+                    return
+            else:
+                self.on_set_status("⚠️ Debes seleccionar una criatura como objetivo")
+                return
 
         # ── MODO BLOQUEO (válido en ambos turnos si hay atacantes) ────
         if is_combat_phase and self.state.combat_subphase == "bloquear" and self.game.attackers:
@@ -139,35 +170,60 @@ class EventHandler:
                     self.on_log(f"🔧 {card.name}: +1 maná verde")
 
     def _handle_block_click(self, card: Card, zone: str):
+        print(f"🔍 _handle_block_click: zone={zone}, card={card.name}, selecting_for={self.state.selecting_blocker_for}")
+        
         if zone == "creature_opp":
-            attacker = next((a for a in self.game.attackers if a is card), None)
+            # Buscar el PRIMER atacante con este nombre que NO tenga bloqueador
+            attacker = None
+            for a in self.game.attackers:
+                if a.name == card.name and a not in self.state.temp_blockers:
+                    attacker = a
+                    break
+            
             if attacker is None:
-                self.on_set_status(f"{card.name} no está atacando")
+                # Verificar si todos los atacantes con este nombre ya están bloqueados
+                all_blocked = all(a in self.state.temp_blockers for a in self.game.attackers if a.name == card.name)
+                if all_blocked:
+                    self.on_set_status(f"Todos los {card.name} ya están bloqueados")
+                else:
+                    self.on_set_status(f"{card.name} no está atacando")
                 return
-            if attacker in self.state.temp_blockers:
-                self.on_set_status(f"{card.name} ya está bloqueado")
-            else:
-                self.state.selecting_blocker_for = attacker
-                self.on_set_status(f"Selecciona criatura para bloquear a {card.name}")
+            
+            self.state.selecting_blocker_for = attacker
+            self.on_set_status(f"Selecciona una criatura para bloquear a {card.name}")
+            print(f"✅ Atacante seleccionado: {attacker.name} (id={id(attacker)})")
+        
         elif zone == "creature_player":
             if self.state.selecting_blocker_for is None:
                 self.on_set_status("Primero selecciona un atacante (criatura del oponente)")
                 return
+            
             if not card.can_block():
-                reason = "está girada" if card.tapped else "tiene fiebre de ataque"
+                reason = "está girada" if card.tapped else "tiene mareo de invocación"
                 self.on_set_status(f"{card.name} no puede bloquear ({reason})")
                 return
+            
+            # Verificar si esta criatura ya está bloqueando a otro atacante
             if card in self.state.temp_blockers.values():
-                self.on_set_status(f"{card.name} ya está bloqueando")
+                self.on_set_status(f"{card.name} ya está bloqueando a otra criatura")
                 return
-            self.state.temp_blockers[self.state.selecting_blocker_for] = card
-            self.on_set_status(f"{card.name} bloquea a {self.state.selecting_blocker_for.name}")
-            self.state.selecting_blocker_for = None
-        else:
-            # Clic fuera de criatura: cancelar selección
-            if self.state.selecting_blocker_for is not None:
+            
+            # Verificar que el atacante no tenga ya un bloqueador
+            attacker = self.state.selecting_blocker_for
+            if attacker in self.state.temp_blockers:
+                self.on_set_status(f"{attacker.name} ya tiene bloqueador")
                 self.state.selecting_blocker_for = None
-                self.on_set_status("Selección cancelada")
+                return
+            
+            # ASIGNAR BLOQUEO
+            self.state.temp_blockers[attacker] = card
+            print(f"✅ BLOQUEO ASIGNADO: {card.name} bloquea a {attacker.name} (id={id(attacker)})")
+            print(f"📦 temp_blockers ahora: {[(a.name, b.name) for a, b in self.state.temp_blockers.items()]}")
+            self.on_set_status(f"{card.name} bloquea a {attacker.name}")
+            
+            # Limpiar selección para poder elegir otro atacante
+            self.state.selecting_blocker_for = None
+            self.on_set_status(f"Selecciona otro atacante o presiona ESPACIO para continuar")
 
     def _play_from_hand(self, card: Card):
         player = self.game.players[0]
@@ -197,35 +253,66 @@ class EventHandler:
                 self.state.pending_attackers.append(card)
                 self.on_set_status(f"{card.name} atacará")
         else:
-            reason = "tiene fiebre de ataque" if card.summoning_sickness else "está girada"
+            reason = "tiene mareo de invocación" if card.summoning_sickness else "está girada"
             self.on_set_status(f"{card.name} no puede atacar ({reason})")
 
     def _pick_spell_targets(self, card: Card) -> List:
         text = card.text.lower()
-        if "daño" in text:
+        
+        # Bandage (prevenir daño) - NO es daño
+        if "bandage" in card.name.lower():
+            # Elegir una criatura del jugador o al propio jugador
+            player = self.game.current_player()
+            creatures = [c for c in player.battlefield if c.card_type == CardType.CREATURE]
+            if creatures:
+                return [creatures[0]]
+            return [player]
+        
+        # Peek (robar carta) - no requiere objetivo
+        if "peek" in card.name.lower():
+            return []
+        
+        # Terror (destruir criatura enemiga)
+        if "terror" in card.name.lower():
+            opponent = self.game.opponent()
+            creatures = [c for c in opponent.battlefield if c.card_type == CardType.CREATURE]
+            if creatures:
+                return [creatures[0]]
+            return []
+        
+        # Giant Growth y Fists of the Anvil (buff a criatura)
+        if "giant growth" in card.name.lower() or "fists of the anvil" in card.name.lower():
+            player = self.game.current_player()
+            creatures = [c for c in player.battlefield if c.card_type == CardType.CREATURE]
+            if creatures:
+                return [creatures[0]]
+            return []
+        
+        # Hechizos de daño
+        if "daño" in text and "prevén" not in text:
             return [self.game.opponent()]
+        
+        # Ganar vida
         if "ganas" in text and "vida" in text:
             return [self.game.current_player()]
+        
         return []
 
     def _update_hover(self, pos):
+        # Guardar la carta anterior antes de actualizar
+        previous_hovered = self.state.hovered_card
+        
         self.state.hovered_card = None
         self.state.hovered_zone = None
         mouse_x, mouse_y = pos
         screen_h = GameConfig.SCREEN_HEIGHT
         
-        # Detectar hover en cementerio (zona derecha del playmat)
-        # Las coordenadas aproximadas del cementerio están en playmat.py
-        # Asumimos que el cementerio está en la zona derecha, alrededor de x > ancho-120
-        
         # Resetear estado de cementerio
         self.state.hovering_graveyard = False
         
         # Verificar si el ratón está sobre el área del cementerio del jugador
-        # (esto es aproximado, puedes ajustar las coordenadas)
         if mouse_x > GameConfig.SCREEN_WIDTH - 130 and mouse_y > GameConfig.SCREEN_HEIGHT - 250:
             self.state.hovering_graveyard = True
-            # Actualizar la carta mostrada según el índice
             player = self.game.players[0]
             if player.graveyard:
                 idx = self.state.graveyard_scroll_index
@@ -241,6 +328,15 @@ class EventHandler:
                 self.state.hovered_card = card
                 self.state.hovered_zone = zone
                 break
+        
+        # Solo imprimir si la carta ha cambiado
+        if self.state.hovered_card != previous_hovered:
+            if self.state.hovered_card:
+                print(f"🖱️ HOVER sobre {self.state.hovered_card.name} (zona {self.state.hovered_zone})")
+            else:
+                # Opcional: cuando deja de hacer hover
+                # print(f"🖱️ HOVER terminado")
+                pass
 
     def _update_graveyard_display(self):
         """Actualiza la carta mostrada del cementerio según el índice"""
@@ -252,41 +348,73 @@ class EventHandler:
             self.state.selected_graveyard_card = player.graveyard[self.state.graveyard_scroll_index]
     
     def _update_graveyard_hover(self, pos):
-        """Detecta si el ratón está sobre el área del cementerio"""
+        """Detecta si el ratón está sobre el área del cementerio (jugador u oponente)"""
         mouse_x, mouse_y = pos
         W, H = GameConfig.SCREEN_WIDTH, GameConfig.SCREEN_HEIGHT
         
-        # Área del cementerio del jugador (esquina inferior derecha)
-        graveyard_rect = pygame.Rect(W - 120, H - 250, 100, 120)
+        # Área del cementerio del jugador (esquina inferior derecha del playmat del jugador)
+        # Ajusta estas coordenadas según la posición real de tu playmat
+        player_graveyard_rect = pygame.Rect(W - 130, H - 250, 100, 120)
         
-        if graveyard_rect.collidepoint(mouse_x, mouse_y):
+        # Área del cementerio del oponente (esquina superior derecha del playmat del oponente)
+        opponent_graveyard_rect = pygame.Rect(W - 130, 130, 100, 120)
+        
+        # Resetear estado
+        self.state.hovering_graveyard = False
+        self.state.hovering_opponent_graveyard = False
+        self.state.graveyard_display_card = None
+        
+        # Verificar cementerio del jugador
+        if player_graveyard_rect.collidepoint(mouse_x, mouse_y):
             self.state.hovering_graveyard = True
             player = self.game.players[0]
             if player.graveyard:
                 max_idx = len(player.graveyard) - 1
                 self.state.graveyard_scroll_index = max(0, min(self.state.graveyard_scroll_index, max_idx))
                 self.state.graveyard_display_card = player.graveyard[self.state.graveyard_scroll_index]
-            else:
-                self.state.graveyard_display_card = None
-        else:
-            self.state.hovering_graveyard = False
-            self.state.graveyard_display_card = None
+            return
+        
+        # Verificar cementerio del oponente
+        if opponent_graveyard_rect.collidepoint(mouse_x, mouse_y):
+            self.state.hovering_opponent_graveyard = True
+            opponent = self.game.players[1]
+            if opponent.graveyard:
+                # Usar un índice separado para el oponente (opcional)
+                max_idx = len(opponent.graveyard) - 1
+                idx = min(self.state.opponent_graveyard_scroll_index, max_idx)
+                self.state.graveyard_display_card = opponent.graveyard[idx]
+            return
 
     def _handle_graveyard_scroll(self, button):
-        """Maneja el scroll en el cementerio"""
-        if not self.state.hovering_graveyard:
-            return
+        """Maneja el scroll en el cementerio (jugador u oponente)"""
+        if self.state.hovering_graveyard:
+            player = self.game.players[0]
+            if not player.graveyard:
+                return
+            
+            if button == 4:  # Scroll up
+                self.state.graveyard_scroll_index += 1
+            elif button == 5:  # Scroll down
+                self.state.graveyard_scroll_index -= 1
+            
+            max_idx = len(player.graveyard) - 1
+            self.state.graveyard_scroll_index = max(0, min(self.state.graveyard_scroll_index, max_idx))
+            self.state.graveyard_display_card = player.graveyard[self.state.graveyard_scroll_index]
         
-        player = self.game.players[0]
-        if not player.graveyard:
-            return
-        
-        if button == 4:  # Scroll up (anterior)
-            self.state.graveyard_scroll_index += 1
-        elif button == 5:  # Scroll down (siguiente)
-            self.state.graveyard_scroll_index -= 1
-        
-        # Limitar índice
-        max_idx = len(player.graveyard) - 1
-        self.state.graveyard_scroll_index = max(0, min(self.state.graveyard_scroll_index, max_idx))
-        self.state.graveyard_display_card = player.graveyard[self.state.graveyard_scroll_index]
+        elif self.state.hovering_opponent_graveyard:
+            opponent = self.game.players[1]
+            if not opponent.graveyard:
+                return
+            
+            if button == 4:  # Scroll up
+                self.state.opponent_graveyard_scroll_index += 1
+            elif button == 5:  # Scroll down
+                self.state.opponent_graveyard_scroll_index -= 1
+            
+            max_idx = len(opponent.graveyard) - 1
+            self.state.opponent_graveyard_scroll_index = max(0, min(self.state.opponent_graveyard_scroll_index, max_idx))
+            self.state.graveyard_display_card = opponent.graveyard[self.state.opponent_graveyard_scroll_index]
+
+    def set_graveyard_rects(self, player_rect, opponent_rect):
+        self.player_graveyard_rect = player_rect
+        self.opponent_graveyard_rect = opponent_rect

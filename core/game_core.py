@@ -117,7 +117,15 @@ class Player:
         self.floating_mana.clear()
 
     def take_damage(self, damage: int) -> bool:
-        self.life -= damage
+        # Verificar si hay prevención de daño activa
+        if hasattr(self, 'prevent_next_damage') and self.prevent_next_damage > 0:
+            prevented = min(damage, self.prevent_next_damage)
+            damage -= prevented
+            self.prevent_next_damage -= prevented
+            self.game.add_log(f"🛡️ Se previenen {prevented} puntos de daño a {self.name}")
+        
+        if damage > 0:
+            self.life -= damage
         return self.life <= 0
 
     def discard_to_hand_size(self):
@@ -146,17 +154,18 @@ class Game:
         self.log_messages: List[str] = []
         # Índice del defensor (el que NO ataca) — fijado al entrar en combate
         self.defending_player_index: int = 1
+        self.pending_target_selection = None
 
     def add_log(self, message: str):
         # Guardamos todos los mensajes sin límite
-        self.log_messages.append(message)
-        # Opcional: limitar a 500 para evitar memoria excesiva
-        if len(self.log_messages) > 500:
-            self.log_messages.pop(0)
-        
+        self.log_messages.append(message)        
         # Imprimir en consola con turno y fase
         turno = self.turn
         fase = self.phase.upper()[:4]
+        if self.phase == "combate" and hasattr(self, 'subphase'):
+            fase = f"COMB({self.subphase[:3].upper()})"
+        else:
+            fase = self.phase.upper()[:4]
         jugador = "JUGADOR" if self.active_player == 0 else "IA"
         print(f"[T{turno}:{fase}:{jugador}] {message}")
 
@@ -187,6 +196,8 @@ class Game:
         player = self.current_player()
         if self.phase == "mantenimiento":
             player.untap_all()
+            player.land_played_this_turn = False  # Asegurar reset al inicio del turno
+            print(f"DEBUG: Mantenimiento - reset land_played_this_turn para {player.name}")  # Añadir print
             self.add_log("🔄 Se enderezan todas las cartas")
         elif self.phase == "robo":
             player.draw_card()
@@ -199,6 +210,16 @@ class Game:
             self.defending_player_index = 1 - self.active_player
             self.add_log("⚔️ Fase de combate iniciada ⚔️")
         elif self.phase == "final":
+            # Revertir buffs temporales de criaturas
+            for player in self.players:
+                for card in player.battlefield:
+                    if hasattr(card, 'temp_buffs') and card.temp_buffs:
+                        for buff_name, power_bonus, toughness_bonus in card.temp_buffs:
+                            card.power = (card.power or 0) - power_bonus
+                            card.toughness = (card.toughness or 0) - toughness_bonus
+                            self.add_log(f"🔄 {card.name}: Se revierte {buff_name} ({card.power}/{card.toughness})")
+                        card.temp_buffs.clear()
+            
             # Sacrificar criaturas con "al final del turno, sacrifica"
             for card in player.battlefield[:]:
                 if (card.card_type == CardType.CREATURE
@@ -207,8 +228,10 @@ class Game:
                     player.battlefield.remove(card)
                     player.graveyard.append(card)
                     self.add_log(f"💀 {card.name} es sacrificado al final del turno")
+            
             player.discard_to_hand_size()
             player.land_played_this_turn = False
+            print(f"DEBUG: Reset land_played_this_turn para {player.name}")  # Añadir print
             self.add_log("🔚 Fin del turno")
 
     def end_turn(self):
@@ -216,10 +239,13 @@ class Game:
         self.active_player = 1 - self.active_player
         self.turn += 1
         self.phase = "mantenimiento"
-        self.turn_count = 1
         self.combat_active = False
         self.attackers.clear()
         self.blockers.clear()
+        
+        # Resetear land_played_this_turn para el nuevo jugador activo
+        self.current_player().land_played_this_turn = False
+        
         self.execute_phase_actions()
         self.add_log(f"{'='*38}")
         self.add_log(f"✨ Turno {self.turn} — {self.current_player().name} ✨")
@@ -268,36 +294,137 @@ class Game:
 
     def apply_card_effect(self, card: Card, controller: Player, targets: List):
         text = card.text.lower()
-        if "daño" in text:
+        
+        # ============================================================
+        # BANDAGE (prevenir daño + robar carta)
+        # ============================================================
+        if "bandage" in card.name.lower():
+            if targets and len(targets) > 0:
+                target = targets[0]
+                if not hasattr(target, 'prevent_next_damage'):
+                    target.prevent_next_damage = 0
+                target.prevent_next_damage += 1
+                target_name = target.name if hasattr(target, 'name') else str(target)
+                self.add_log(f"🩹 {card.name}: Previene el próximo 1 punto de daño a {target_name}")
+            
+            # Robar carta
+            controller.draw_card()
+            self.add_log(f"📖 {card.name}: {controller.name} roba una carta")
+            return
+        
+        # ============================================================
+        # PEEK (robar carta + mirar mano)
+        # ============================================================
+        if "peek" in card.name.lower():
+            # Robar carta
+            controller.draw_card()
+            self.add_log(f"📖 {card.name}: {controller.name} roba una carta")
+            
+            # Mirar mano del oponente
+            opponent = self.opponent()
+            hand_str = ", ".join([c.name for c in opponent.hand])
+            self.add_log(f"👁️ {card.name}: Mano de {opponent.name}: {hand_str}")
+            return
+        
+        # ============================================================
+        # TERROR (destruir criatura)
+        # ============================================================
+        if "terror" in card.name.lower():
+            if targets and len(targets) > 0 and isinstance(targets[0], Card):
+                target = targets[0]
+                # Verificar que no sea artefacto ni negra
+                is_artifact = "artefacto" in target.text.lower()
+                is_black = Color.BLACK in target.colors
+                
+                if is_artifact:
+                    self.add_log(f"⚠️ {card.name}: {target.name} es un artefacto, no puede ser objetivo")
+                elif is_black:
+                    self.add_log(f"⚠️ {card.name}: {target.name} es negra, no puede ser objetivo")
+                else:
+                    # Destruir la criatura
+                    target.damage = target.toughness or 1
+                    self.add_log(f"💀 {card.name}: {target.name} es destruida")
+                    self.check_creature_death(target)
+            return
+        
+        # ============================================================
+        # GIANT GROWTH (+3/+3)
+        # ============================================================
+        if "giant growth" in card.name.lower():
+            if targets and len(targets) > 0 and isinstance(targets[0], Card):
+                target = targets[0]
+                old_power = target.power
+                old_toughness = target.toughness
+                if not hasattr(target, 'temp_buffs'):
+                    target.temp_buffs = []
+                target.temp_buffs.append(("giant_growth", 3, 3))
+                target.power = (target.power or 0) + 3
+                target.toughness = (target.toughness or 0) + 3
+                self.add_log(f"🌿 {card.name}: {target.name} obtiene +3/+3 ({old_power}/{old_toughness} → {target.power}/{target.toughness})")
+            return
+        
+        # ============================================================
+        # FISTS OF THE ANVIL (+4/+0)
+        # ============================================================
+        if "fists of the anvil" in card.name.lower():
+            if targets and len(targets) > 0 and isinstance(targets[0], Card):
+                target = targets[0]
+                old_power = target.power
+                if not hasattr(target, 'temp_buffs'):
+                    target.temp_buffs = []
+                target.temp_buffs.append(("fists", 4, 0))
+                target.power = (target.power or 0) + 4
+                self.add_log(f"👊 {card.name}: {target.name} obtiene +4/+0 ({old_power} → {target.power})")
+            return
+        
+        # ============================================================
+        # HECHIZOS DE DAÑO (Rayo, Descarga, etc.)
+        # ============================================================
+        if "daño" in text and "prevén" not in text:
             m = re.search(r'(\d+)\s*puntos?\s*de\s*daño', text) or re.search(r'hace\s*(\d+)', text)
             if m:
                 dmg = int(m.group(1))
-                target = targets[0] if targets else self.opponent()
-                if isinstance(target, Player):
-                    target.take_damage(dmg)
-                    self.add_log(f"💥 {card.name} hace {dmg} daño a {target.name}")
-                elif isinstance(target, Card):
-                    target.damage += dmg
-                    self.add_log(f"💥 {card.name} hace {dmg} daño a {target.name}")
-                    self.check_creature_death(target)
-        elif "ganas" in text and "vida" in text:
+                if targets and len(targets) > 0:
+                    target = targets[0]
+                    if isinstance(target, Player):
+                        target.take_damage(dmg)
+                        self.add_log(f"💥 {card.name} hace {dmg} daño a {target.name}")
+                    elif isinstance(target, Card):
+                        target.damage += dmg
+                        self.add_log(f"💥 {card.name} hace {dmg} daño a {target.name}")
+                        self.check_creature_death(target)
+                else:
+                    opponent = self.opponent()
+                    opponent.take_damage(dmg)
+                    self.add_log(f"💥 {card.name} hace {dmg} daño a {opponent.name}")
+            return
+        
+        # ============================================================
+        # GANAR VIDA
+        # ============================================================
+        if "ganas" in text and "vida" in text:
             m = re.search(r'ganas\s*(\d+)\s*vidas?', text)
             if m:
                 controller.life += int(m.group(1))
                 self.add_log(f"💚 {controller.name} gana {m.group(1)} vidas")
-        elif "entra al campo" in text and "ganas" in text:
+            return
+        
+        # ============================================================
+        # ENTRADA AL CAMPO con ganar vida
+        # ============================================================
+        if "entra al campo" in text and "ganas" in text:
             controller.life += 4
             self.add_log(f"💚 {controller.name} gana 4 vidas por {card.name}")
+            return
 
     # ------------------------------------------------------------------
     # Combate
     # ------------------------------------------------------------------
 
-    # core/game_core.py
-    # En check_creature_death, modificar la habilidad de Festering Goblin
-
     def check_creature_death(self, creature: Card):
+        print(f"🔍 CHECK_CREATURE_DEATH: {creature.name} (damage={creature.damage}, toughness={creature.toughness})")
         if creature.damage < (creature.toughness or 0):
+            print(f"   ✅ {creature.name} sobrevive")
             return
         
         for player in self.players:
@@ -305,26 +432,63 @@ class Game:
                 player.battlefield.remove(creature)
                 player.graveyard.append(creature)
                 self.add_log(f"💀 {creature.name} muere")
+                print(f"   💀 {creature.name} removido del campo")
                 
                 # Habilidad disparada: Festering Goblin
                 if creature.name == "Festering Goblin":
-                    # Buscar criaturas VIVAS en el campo de batalla (excluyendo al propio goblin que ya murió)
                     all_creatures = [
                         c for p in self.players 
                         for c in p.battlefield 
                         if c.card_type == CardType.CREATURE
                     ]
                     if all_creatures:
-                        # Elegir la primera criatura viva (o podrías elegir aleatoriamente o la más débil)
-                        target = all_creatures[0]
-                        old_power = target.power
-                        old_toughness = target.toughness
-                        target.power = max(0, (target.power or 1) - 1)
-                        target.toughness = max(0, (target.toughness or 1) - 1)
-                        self.add_log(f"🔧 {creature.name}: {target.name} obtiene -1/-1 ({old_power}/{old_toughness} → {target.power}/{target.toughness})")
+                        self._request_target_selection(creature, all_creatures)
                     else:
                         self.add_log(f"🔧 {creature.name} muere, pero no hay criaturas objetivo")
-                break
+                break  # <-- Este break debe estar indentado dentro del if, pero al mismo nivel que el código anterior
+
+    def _ai_choose_festering_target(self, creatures: List[Card]) -> Card:
+        """IA elige objetivo para Festering Goblin (prioriza las criaturas del jugador)"""
+        # Primero, buscar criaturas del jugador (oponente)
+        player_creatures = [c for c in creatures if c in self.players[0].battlefield]
+        if player_creatures:
+            # Elegir la más débil (menor resistencia)
+            return min(player_creatures, key=lambda c: c.toughness or 0)
+        # Si no hay criaturas del jugador, elegir cualquiera
+        return creatures[0]
+
+    def _apply_festering_goblin_effect(self, target: Card):
+        """Aplica el efecto de -1/-1 al objetivo seleccionado."""
+        old_power = target.power
+        old_toughness = target.toughness
+        target.power = max(0, (target.power or 1) - 1)
+        target.toughness = max(0, (target.toughness or 1) - 1)
+        self.add_log(f"🔧 Festering Goblin: {target.name} obtiene -1/-1 ({old_power}/{old_toughness} → {target.power}/{target.toughness})")
+        # Verificar si la criatura objetivo muere por el -1/-1
+        if target.toughness <= 0:
+            target.damage = target.toughness + 1  # Forzar muerte
+            self.check_creature_death(target)
+
+    def _request_target_selection(self, source_card: Card, possible_targets: List[Card]):
+        """Activa el modo de selección manual de objetivo."""
+        self.pending_target_selection = {
+            "source": source_card,
+            "targets": possible_targets,
+            "callback": self._apply_festering_goblin_effect
+        }
+
+    def _apply_festering_goblin_effect(self, target: Card):
+        """Aplica -1/-1 al objetivo seleccionado."""
+        old_power = target.power
+        old_toughness = target.toughness
+        target.power = max(0, (target.power or 1) - 1)
+        target.toughness = max(0, (target.toughness or 1) - 1)
+        self.add_log(f"🔧 Festering Goblin: {target.name} obtiene -1/-1 ({old_power}/{old_toughness} → {target.power}/{target.toughness})")
+        # Verificar si la criatura objetivo muere por el -1/-1
+        if target.toughness <= 0:
+            target.damage = target.toughness + 1  # Forzar muerte
+            self.check_creature_death(target)
+        self.pending_target_selection = None
 
     def declare_attackers(self, attackers: List[Card]) -> bool:
         if self.phase != "combate" or not self.combat_active:
@@ -336,7 +500,7 @@ class Game:
                 a.tapped = True
                 self.add_log(f"⚔️ {a.name} ({a.power}/{a.toughness}) ataca")
             else:
-                reason = "fiebre de ataque" if a.summoning_sickness else "está girada"
+                reason = "mareo de invocación" if a.summoning_sickness else "está girada"
                 self.add_log(f"⚠️ {a.name} no puede atacar ({reason})")
         self.attackers = valid
         if valid:
@@ -344,101 +508,164 @@ class Game:
         return True
 
     def declare_blockers(self, blockers: Dict[Card, Card]) -> bool:
-        """blockers = {atacante: bloqueador}. Los bloqueadores son del defending_player."""
+        print(f"\n🔍 DECLARE_BLOCKERS - Recibido: {[(att.name, blk.name) for att, blk in blockers.items()]}")
+        
         if self.phase != "combate" or not self.attackers:
+            print(f"❌ No se pueden declarar bloqueadores: phase={self.phase}, attackers={[a.name for a in self.attackers]}")
             return False
         
-        defender_bf = set(self.defending_player().battlefield)
+        # Lista de bloqueadores disponibles (por objeto, no por nombre)
+        available_blockers = [c for c in self.defending_player().battlefield if c.card_type == CardType.CREATURE]
+        print(f"📦 Bloqueadores disponibles: {[b.name for b in available_blockers]}")
+        
         valid: Dict[Card, Card] = {}
+        used_attackers = set()
         
         for att, blk in blockers.items():
-            if blk not in defender_bf or not blk.can_block():
+            print(f"\n🔍 Procesando par: atacante={att.name}, bloqueador={blk.name}")
+            
+            # Buscar el bloqueador REAL en la lista de disponibles (usando el nombre y que no esté ya usado)
+            real_blk = None
+            for b in available_blockers:
+                if b.name == blk.name and b not in valid.values():
+                    real_blk = b
+                    break
+            
+            if real_blk is None:
+                print(f"❌ Bloqueador {blk.name} no está disponible")
                 continue
             
-            # 1. Verificar Vuela (Flying) en el ATACANTE
-            att_flies = "vuela" in att.text.lower() or "flying" in att.text.lower()
-            blk_flies = "vuela" in blk.text.lower() or "flying" in blk.text.lower()
-            blk_reach = "alcance" in blk.text.lower() or "reach" in blk.text.lower()
+            if not real_blk.can_block():
+                print(f"❌ {real_blk.name} no puede bloquear")
+                continue
+            
+            # Buscar un atacante con el mismo nombre que no haya sido usado
+            real_att = None
+            for a in self.attackers:
+                if a.name == att.name and a not in used_attackers:
+                    real_att = a
+                    break
+            
+            if real_att is None:
+                print(f"❌ No se encontró atacante {att.name} disponible")
+                continue
+            
+            print(f"✅ Atacante encontrado: {real_att.name} (id={id(real_att)})")
+            print(f"✅ Bloqueador encontrado: {real_blk.name} (id={id(real_blk)})")
+            
+            # Verificar Vuela
+            att_flies = "vuela" in real_att.text.lower() or "flying" in real_att.text.lower()
+            blk_flies = "vuela" in real_blk.text.lower() or "flying" in real_blk.text.lower()
+            blk_reach = "alcance" in real_blk.text.lower() or "reach" in real_blk.text.lower()
             
             if att_flies and not blk_flies and not blk_reach:
-                self.add_log(f"⚠️ {blk.name} no puede bloquear a {att.name} (tiene Vuela)")
+                print(f"❌ {real_blk.name} no puede bloquear a {real_att.name} (Vuela)")
                 continue
             
-            # 2. Verificar restricción de Cloud Sprite (solo puede bloquear criaturas con Vuela)
-            if "solo puede bloquear" in blk.text.lower() or "only block creatures with flying" in blk.text.lower():
+            # Verificar restricción de Cloud Sprite
+            if "solo puede bloquear" in real_blk.text.lower():
                 if not att_flies:
-                    self.add_log(f"⚠️ {blk.name} solo puede bloquear criaturas con Vuela, pero {att.name} no vuela")
+                    print(f"❌ {real_blk.name} solo puede bloquear criaturas con Vuela")
                     continue
             
-            valid[att] = blk
-            self.add_log(f"🛡️ {blk.name} bloquea a {att.name}")
+            valid[real_att] = real_blk
+            used_attackers.add(real_att)
+            print(f"✅ BLOQUEO VÁLIDO: {real_blk.name} bloquea a {real_att.name}")
         
         for blk in valid.values():
             blk.tapped = True
+        
         self.blockers = valid
+        print(f"\n📦 self.blockers final: {[(a.name, b.name) for a, b in self.blockers.items()]}")
         if valid:
             self.add_log(f"🛡️ {self.defending_player().name} bloquea {len(valid)} atacante(s)")
+        
         return True
 
     def deal_combat_damage(self):
+        print(f"\n🔍 DEAL_COMBAT_DAMAGE - Inicio")
+        print(f"📦 self.attackers: {[a.name for a in self.attackers]}")
+        print(f"📦 self.blockers: {[(a.name, b.name) for a, b in self.blockers.items()]}")
+        
         if not self.attackers:
+            print("❌ No hay atacantes")
             return
         
         self.add_log("💢 Resolviendo daño de combate...")
         
-        # Primera fase: aplicar todo el daño
+        # Crear una lista de pares (atacante, bloqueador)
+        blocker_pairs = list(self.blockers.items())
+        print(f"📦 blocker_pairs inicial: {[(a.name, b.name) for a, b in blocker_pairs]}")
+        
+        # Primera fase: aplicar daño
         for attacker in self.attackers[:]:
+            print(f"\n🔍 Procesando atacante: {attacker.name} (id={id(attacker)})")
             att_power = attacker.power or 0
             has_trample = "arrolla" in attacker.text.lower() or "trample" in attacker.text.lower()
             
-            if attacker in self.blockers:
-                blocker = self.blockers[attacker]
+            # Buscar un bloqueador para este atacante
+            blocker = None
+            blocker_idx = -1
+            for i, (att, blk) in enumerate(blocker_pairs):
+                if att.name == attacker.name:
+                    blocker = blk
+                    blocker_idx = i
+                    print(f"   Encontrado bloqueador {blk.name} (id={id(blk)}) para atacante {attacker.name}")
+                    break
+            
+            if blocker:
                 blk_power = blocker.power or 0
                 blocker_toughness = blocker.toughness or 0
                 
                 # Atacante daña al bloqueador
                 blocker.damage += att_power
                 self.add_log(f"  {attacker.name} ({att_power}) → {blocker.name}")
+                print(f"   {blocker.name} recibe {att_power} daño (total: {blocker.damage}/{blocker.toughness})")
                 
                 # Bloqueador daña al atacante
                 attacker.damage += blk_power
                 self.add_log(f"  {blocker.name} ({blk_power}) → {attacker.name}")
+                print(f"   {attacker.name} recibe {blk_power} daño (total: {attacker.damage}/{attacker.toughness})")
                 
-                # Arrolla: calcular daño sobrante (se aplicará después)
-                remaining_damage = max(0, att_power - blocker_toughness)
-                if has_trample and remaining_damage > 0:
-                    self.add_log(f"  🌟 ARROLLA! {attacker.name} hará {remaining_damage} daño sobrante")
+                # Arrolla
+                if has_trample:
+                    remaining_damage = max(0, att_power - blocker_toughness)
+                    if remaining_damage > 0:
+                        old_life = self.defending_player().life
+                        self.defending_player().take_damage(remaining_damage)
+                        self.add_log(f"  🌟 ARROLLA! {attacker.name} hace {remaining_damage} daño SOBRANTE a {self.defending_player().name} ({old_life} → {self.defending_player().life})")
+                
+                # Eliminar este par
+                if blocker_idx >= 0:
+                    blocker_pairs.pop(blocker_idx)
+                    print(f"   Par eliminado, restan {len(blocker_pairs)} pares")
             else:
-                # Daño directo al jugador
+                # Daño directo
                 old_life = self.defending_player().life
                 self.defending_player().take_damage(att_power)
                 self.add_log(f"  {attacker.name} ({att_power}) → {self.defending_player().name} ({old_life} → {self.defending_player().life})")
+                print(f"   Daño directo: {attacker.name} hace {att_power} daño a {self.defending_player().name}")
         
-        # Segunda fase: verificar muertes (después de todo el daño)
+        # Segunda fase: verificar muertes
         self.add_log("  --- Verificando muertes ---")
-        for attacker in self.attackers[:]:
-            if attacker in self.blockers:
-                blocker = self.blockers[attacker]
-                self.check_creature_death(blocker)
-                self.check_creature_death(attacker)
         
-        # Tercera fase: aplicar daño sobrante de Arrolla (después de las muertes)
-        for attacker in self.attackers[:]:
-            if attacker in self.blockers:
-                has_trample = "arrolla" in attacker.text.lower() or "trample" in attacker.text.lower()
-                blocker = self.blockers[attacker]
-                blocker_toughness = blocker.toughness or 0
-                remaining_damage = max(0, (attacker.power or 0) - blocker_toughness)
-                
-                if has_trample and remaining_damage > 0 and attacker.damage < (attacker.toughness or 0):
-                    old_life = self.defending_player().life
-                    self.defending_player().take_damage(remaining_damage)
-                    self.add_log(f"  🌟 ARROLLA! {attacker.name} hace {remaining_damage} daño SOBRANTE a {self.defending_player().name} ({old_life} → {self.defending_player().life})")
+        all_creatures = set()
+        for p in self.players:
+            all_creatures.update([c for c in p.battlefield if c.card_type == CardType.CREATURE])
+        
+        print(f"\n🔍 Verificando muertes de {len(all_creatures)} criaturas:")
+        for creature in all_creatures:
+            if creature.damage >= (creature.toughness or 0):
+                print(f"   💀 {creature.name} tiene {creature.damage}/{creature.toughness} - MUERE")
+                self.check_creature_death(creature)
+            else:
+                print(f"   ✅ {creature.name} tiene {creature.damage}/{creature.toughness} - SOBREVIVE")
         
         self.attackers.clear()
         self.blockers.clear()
         self.combat_active = False
         self.add_log("💢 Daño de combate resuelto")
+        print("🔍 DEAL_COMBAT_DAMAGE - Fin\n")
 
     def check_game_over(self) -> Optional[Player]:
         for player in self.players:

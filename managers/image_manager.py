@@ -34,6 +34,7 @@ class ImageManager:
         self._card_images_highres: Dict[str, Optional[pygame.Surface]] = {}
         self._back_card_image: Optional[pygame.Surface] = None
         self.base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self._mana_icons: Dict[str, Optional[pygame.Surface]] = {}
 
     # ------------------------------------------------------------------
     # Búsqueda de rutas
@@ -149,3 +150,40 @@ class ImageManager:
         self._card_images.clear()
         self._card_images_highres.clear()
         self._back_card_image = None
+    
+    def load_mana_icon(self, color: str) -> Optional[pygame.Surface]:
+        """Carga el icono de maná para el color especificado."""
+        if not hasattr(self, '_mana_icons'):
+            self._mana_icons = {}
+        
+        if color in self._mana_icons:
+            return self._mana_icons[color]
+        
+        color_lower = color.lower()
+        filename = f"{color_lower}_mana.png"
+        
+        # Posibles rutas donde buscar
+        possible_paths = [
+            os.path.join(self.base_dir, "assets", "icons", filename),
+            os.path.join("assets", "icons", filename),
+            os.path.join(self.base_dir, "assets", "icons", f"{color_lower}_mana.png"),
+            os.path.join("assets", "icons", f"{color_lower}_mana.png"),
+            # También buscar directamente en la carpeta icons
+            filename,
+        ]
+        
+        print(f"🔍 Buscando icono para {color} en: {possible_paths}")
+        
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                try:
+                    img = pygame.image.load(path).convert_alpha()
+                    self._mana_icons[color] = img
+                    print(f"✅ Icono de maná cargado: {color} desde {path}")
+                    return img
+                except pygame.error as e:
+                    print(f"❌ Error cargando {path}: {e}")
+        
+        print(f"⚠️ No se encontró icono para {color}, usando fallback")
+        self._mana_icons[color] = None
+        return None

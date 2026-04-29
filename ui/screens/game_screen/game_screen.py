@@ -123,6 +123,9 @@ class GameScreen:
 
     def handle_event(self, event) -> Optional[str]:
         self.event_handler.set_card_rects(self.renderer.get_card_rects())
+        player_graveyard_rect = self.player_playmat.graveyard_rect
+        opponent_graveyard_rect = self.opponent_playmat.graveyard_rect
+        self.event_handler.set_graveyard_rects(player_graveyard_rect, opponent_graveyard_rect)
         return self.event_handler.handle_event(
             event,
             self.is_player_turn(),
@@ -148,6 +151,7 @@ class GameScreen:
             self.state.combat_subphase = "bloquear"
             self.state.temp_blockers.clear()
             self.state.selecting_blocker_for = None
+            print("🔁 Subfase cambiada a BLOQUEAR (IA ataca)")
             self.state.set_status("⚔️ IA ataca — selecciona bloqueadores y pulsa ESPACIO", ticks=300)
 
         mouse_y = pygame.mouse.get_pos()[1]
